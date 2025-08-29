@@ -51,6 +51,19 @@ async def chat_get() -> dict:
     }
 
 
+@app.get("/api/v2/chat/echo")
+@app.get("/v2/chat/echo")
+async def chat_echo(content: Optional[str] = None) -> ChatResponse:
+    user_text = (content or "").strip()
+    reply_text = f"You said: {user_text}" if user_text else "Hello! How can I help you?"
+    usage = Usage(
+        input_tokens=len(user_text.split()),
+        output_tokens=len(reply_text.split()),
+        total_tokens=len(user_text.split()) + len(reply_text.split()),
+    )
+    return ChatResponse(reply=reply_text, usage=usage)
+
+
 @app.post("/api/v2/chat", response_model=ChatResponse)
 @app.post("/v2/chat", response_model=ChatResponse)
 async def chat(req: Request) -> ChatResponse:
