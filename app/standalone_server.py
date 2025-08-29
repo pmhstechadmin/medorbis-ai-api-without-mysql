@@ -55,7 +55,6 @@ def _parse_post(handler: BaseHTTPRequestHandler):
 # --- Embeddings using Sentence-Transformers via Hugging Face Inference API (no external deps) ---
 
 def _hf_embed(texts: list[str]) -> list[list[float]] | None:
-    # Uses either a custom endpoint or HF public inference API
     model = os.getenv('SENTENCE_MODEL') or os.getenv('HUGGINGFACE_MODEL') or 'sentence-transformers/all-MiniLM-L6-v2'
     endpoint = os.getenv('HUGGINGFACE_API_URL') or f"https://api-inference.huggingface.co/pipeline/feature-extraction/{model}"
     token = os.getenv('HUGGINGFACE_API_KEY')
@@ -68,7 +67,6 @@ def _hf_embed(texts: list[str]) -> list[list[float]] | None:
         with urlopen(req, timeout=30) as resp:
             data = resp.read()
             parsed = json.loads(data)
-            # HF returns [dim] for single text or [[dim], [dim], ...] for multiple
             if isinstance(parsed, list) and parsed and isinstance(parsed[0], (int, float)):
                 return [parsed]
             if isinstance(parsed, list) and parsed and isinstance(parsed[0], list):
@@ -87,7 +85,18 @@ def _hf_embed(texts: list[str]) -> list[list[float]] | None:
 
 # --- Qdrant search via REST API (no qdrant-client dependency) ---
 
-def _qdrant_search_vec(vec: list[float], limit: int = 3) -> list[dict]:
+def _build_qdrant_filter(dept: str, year: str, sem: str) -> dict | None:
+    must = []
+    if dept:
+        must.append({"key": "Department", "match": {"value": dept}})
+    if year:
+        must.append({"key": "Year", "match": {"value": year}})
+    if sem:
+        must.append({"key": "Semester", "match": {"value": sem}})
+    return {"must": must} if must else None
+
+
+def _qdrant_search_vec(vec: list[float], q_filter: dict | None = None, limit: int = 3) -> list[dict]:
     url = os.getenv('QDRANT_URL')
     api_key = os.getenv('QDRANT_API_KEY')
     collection = os.getenv('QDRANT_COLLECTION', 'documents')
@@ -95,20 +104,12 @@ def _qdrant_search_vec(vec: list[float], limit: int = 3) -> list[dict]:
     if not url:
         return []
 
-    # Fixed metadata filters requested
-    q_filter = {
-        "must": [
-            {"key": "Department", "match": {"value": "Nursing"}},
-            {"key": "Year", "match": {"value": "3"}},
-            {"key": "Semester", "match": {"value": "1"}},
-        ]
-    }
-
     body = {
         "limit": limit,
         "with_payload": True,
-        "filter": q_filter,
     }
+    if q_filter:
+        body["filter"] = q_filter
     if vector_name:
         body["vector"] = {vector_name: vec}
     else:
@@ -146,7 +147,7 @@ def _qdrant_contexts_from_results(results: list[dict]) -> list[str]:
 
 
 class ApiHandler(BaseHTTPRequestHandler):
-    server_version = "MedOrbisSimpleHTTP/1.1"
+    server_version = "MedOrbisSimpleHTTP/1.2"
 
     def _send_headers(self, status=200, extra_headers=None, content_type='application/json'):
         self.send_response(status)
@@ -205,19 +206,11 @@ class ApiHandler(BaseHTTPRequestHandler):
                     "user_id": "string",
                     "session_id": "string",
                     "user_question": "string",
-                    "user_department": "string",
-                    "user_year": "string",
-                    "user_semester": "string"
+                    "Department": "Nursing",
+                    "Year": "3",
+                    "Semester": "1"
                 },
-                "form_example": {
-                    "user_type": "0",
-                    "user_id": "u1",
-                    "session_id": "s1",
-                    "user_question": "Hello",
-                    "user_department": "CSE",
-                    "user_year": "2",
-                    "user_semester": "4"
-                }
+                "note": "You can also use user_department, user_year, user_semester as alternative field names."
             })
         if path == '/api/v1/chat/echo':
             content = (query.get('content', [''])[0] or '').strip()
@@ -238,9 +231,10 @@ class ApiHandler(BaseHTTPRequestHandler):
                 "user_id": _q('user_id'),
                 "session_id": _q('session_id'),
                 "user_question": _q('user_question'),
-                "user_department": _q('user_department'),
-                "user_year": _q('user_year'),
-                "user_semester": _q('user_semester'),
+                # Accept both capitalized metadata and legacy fields
+                "Department": _q('Department') or _q('user_department'),
+                "Year": _q('Year') or _q('user_year'),
+                "Semester": _q('Semester') or _q('user_semester'),
                 "model": _q('model', None),
             }
             return self._send_json(self._generate_v1_reply(payload))
@@ -282,9 +276,10 @@ class ApiHandler(BaseHTTPRequestHandler):
                     "user_id": data.get('user_id', '') or '',
                     "session_id": data.get('session_id', '') or '',
                     "user_question": data.get('user_question', '') or '',
-                    "user_department": data.get('user_department', '') or '',
-                    "user_year": data.get('user_year', '') or '',
-                    "user_semester": data.get('user_semester', '') or '',
+                    # Accept capitalized metadata; fallback to legacy names
+                    "Department": data.get('Department') or data.get('user_department') or '',
+                    "Year": data.get('Year') or data.get('user_year') or '',
+                    "Semester": data.get('Semester') or data.get('user_semester') or '',
                     "model": data.get('model') if data.get('model') not in (None, '') else None,
                 }
                 return self._send_json(self._generate_v1_reply(payload))
@@ -303,35 +298,37 @@ class ApiHandler(BaseHTTPRequestHandler):
     def _generate_v1_reply(self, req: dict) -> dict:
         contexts: list[str] = []
         used_vector = False
+        dept = str(req.get('Department') or req.get('user_department') or '')
+        year = str(req.get('Year') or req.get('user_year') or '')
+        sem = str(req.get('Semester') or req.get('user_semester') or '')
         if int(req.get('user_type') or 0) == 0:
             texts = [str(req.get('user_question') or '')]
             vecs = _hf_embed(texts) if texts and texts[0] else None
             if vecs and vecs[0]:
                 used_vector = True
-                results = _qdrant_search_vec(vecs[0], limit=int(os.getenv('QDRANT_TOP_K', '3')))
+                q_filter = _build_qdrant_filter(dept=dept, year=year, sem=sem)
+                results = _qdrant_search_vec(vecs[0], q_filter=q_filter, limit=int(os.getenv('QDRANT_TOP_K', '3')))
                 contexts = _qdrant_contexts_from_results(results)
 
         prompt_context = (
             f"user_type: {req.get('user_type')}\n"
             f"user_id: {req.get('user_id')}\n"
             f"session_id: {req.get('session_id')}\n"
-            f"department: {req.get('user_department')}\n"
-            f"year: {req.get('user_year')}\n"
-            f"semester: {req.get('user_semester')}\n\n"
+            f"Department: {dept}\n"
+            f"Year: {year}\n"
+            f"Semester: {sem}\n\n"
             f"Question: {req.get('user_question')}\n"
         )
         reply_parts = []
         if contexts:
             reply_parts.append("Relevant information:\n" + "\n---\n".join(contexts))
         reply_parts.append(
-            f"Response: Based on your context (dept={req.get('user_department')}, year={req.get('user_year')}, "
-            f"semester={req.get('user_semester')}), here's a helpful response to your question: "
-            f"{req.get('user_question')}"
+            f"Response: Based on your context (Department={dept}, Year={year}, Semester={sem}), "
+            f"here's a helpful response to your question: {req.get('user_question')}"
         )
         reply_text = "\n\n".join(reply_parts) if reply_parts else (
-            f"[Local] Based on your context (dept={req.get('user_department')}, year={req.get('user_year')}, "
-            f"semester={req.get('user_semester')}), here's a helpful response to your question: "
-            f"{req.get('user_question')}"
+            f"[Local] Based on your context (Department={dept}, Year={year}, Semester={sem}), "
+            f"here's a helpful response to your question: {req.get('user_question')}"
         )
         tokens_in = _word_count(prompt_context)
         if contexts:
