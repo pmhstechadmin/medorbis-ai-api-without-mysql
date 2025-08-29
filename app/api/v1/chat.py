@@ -3,6 +3,7 @@ import json
 from fastapi import APIRouter, Request, HTTPException
 from app.schemas import ChatRequest, ChatResponse, Usage, ChatV1Request
 from app.services.chat_service import generate_reply, generate_v1_llm_reply
+from typing import Optional
 
 router = APIRouter(prefix="/api/v1", tags=["chat"])
 
@@ -44,6 +45,30 @@ async def chat_echo(content: Optional[str] = None) -> ChatResponse:
         total_tokens=len(user_text.split()) + len(reply_text.split()),
     )
     return ChatResponse(reply=reply_text, usage=usage)
+
+
+@router.get("/chat/test", response_model=ChatResponse)
+async def chat_test(
+    user_type: int = 0,
+    user_id: str = "",
+    session_id: str = "",
+    user_question: str = "",
+    user_department: str = "",
+    user_year: str = "",
+    user_semester: str = "",
+    model: Optional[str] = None,
+) -> ChatResponse:
+    parsed = ChatV1Request(
+        user_type=user_type,
+        user_id=user_id,
+        session_id=session_id,
+        user_question=user_question,
+        user_department=user_department,
+        user_year=user_year,
+        user_semester=user_semester,
+        model=model,
+    )
+    return generate_v1_llm_reply(parsed)
 
 
 @router.post("/chat", response_model=ChatResponse)
