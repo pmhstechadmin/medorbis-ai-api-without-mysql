@@ -20,7 +20,10 @@ def generate_reply(req: ChatRequest) -> ChatResponse:
 
 def _embed_texts(texts: List[str]) -> Optional[List[List[float]]]:
     try:
-        from openai import OpenAI
+        try:
+            from langfuse.openai import OpenAI  # type: ignore
+        except Exception:
+            from openai import OpenAI
         # Prefer OpenAI embeddings if available (lighter than local models)
         key = os.getenv("OPENAI_API_KEY") or os.getenv("OPENROUTER_API_KEY")
         if not key:
@@ -79,7 +82,10 @@ def generate_v1_llm_reply(req: ChatV1Request) -> ChatResponse:
     openrouter_key = os.getenv("OPENROUTER_API_KEY")
     if openrouter_key:
         try:
-            from openai import OpenAI
+            try:
+                from langfuse.openai import OpenAI  # type: ignore
+            except Exception:
+                from openai import OpenAI
             headers = {}
             site = os.getenv("OPENROUTER_SITE_URL")
             title = os.getenv("OPENROUTER_APP_NAME")
@@ -119,7 +125,10 @@ def generate_v1_llm_reply(req: ChatV1Request) -> ChatResponse:
 
     if api_key:
         try:
-            from openai import OpenAI
+            try:
+                from langfuse.openai import OpenAI  # type: ignore
+            except Exception:
+                from openai import OpenAI
             client = OpenAI(api_key=api_key, base_url=base_url) if base_url else OpenAI(api_key=api_key)
             resp = client.chat.completions.create(
                 model=model,
