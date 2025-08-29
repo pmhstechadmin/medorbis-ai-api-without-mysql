@@ -39,6 +39,16 @@ class ChatResponse(BaseModel):
     usage: Usage
 
 
+@app.get("/api/v2/chat")
+async def chat_get() -> dict:
+    return {
+        "endpoint": "/api/v2/chat",
+        "method": "POST",
+        "content_type": "application/json",
+        "example": {"messages": [{"role": "user", "content": "Hello"}]},
+    }
+
+
 @app.post("/api/v2/chat", response_model=ChatResponse)
 async def chat(req: ChatRequest) -> ChatResponse:
     last_user = next((m for m in reversed(req.messages) if m.role.lower() == "user"), None)
