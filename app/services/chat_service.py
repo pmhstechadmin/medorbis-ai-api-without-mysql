@@ -1,5 +1,6 @@
 import os
 from app.schemas import ChatRequest, ChatResponse, Usage, ChatV1Request
+from typing import List, Optional
 
 
 def generate_reply(req: ChatRequest) -> ChatResponse:
@@ -17,7 +18,51 @@ def generate_reply(req: ChatRequest) -> ChatResponse:
     return ChatResponse(reply=reply_text, usage=usage)
 
 
+def _embed_texts(texts: List[str]) -> Optional[List[List[float]]]:
+    try:
+        from openai import OpenAI
+        # Prefer OpenAI embeddings if available (lighter than local models)
+        key = os.getenv("OPENAI_API_KEY") or os.getenv("OPENROUTER_API_KEY")
+        if not key:
+            return None
+        base_url = os.getenv("OPENAI_BASE_URL")
+        model = os.getenv("EMBEDDING_MODEL", "text-embedding-3-small")
+        client = OpenAI(api_key=key, base_url=base_url) if os.getenv("OPENAI_API_KEY") else OpenAI(api_key=key, base_url="https://openrouter.ai/api/v1")
+        resp = client.embeddings.create(model=model, input=texts)
+        return [d.embedding for d in resp.data]
+    except Exception:
+        return None
+
+
+def _qdrant_search(query: str) -> List[str]:
+    try:
+        from qdrant_client import QdrantClient
+        url = os.getenv("QDRANT_URL")
+        api_key = os.getenv("QDRANT_API_KEY")
+        collection = os.getenv("QDRANT_COLLECTION", "documents")
+        if not url:
+            return []
+        vecs = _embed_texts([query])
+        if not vecs:
+            return []
+        client = QdrantClient(url=url, api_key=api_key) if api_key else QdrantClient(url=url)
+        res = client.search(collection_name=collection, query_vector=vecs[0], limit=int(os.getenv("QDRANT_TOP_K", "3")))
+        contexts: List[str] = []
+        for p in res:
+            payload = getattr(p, "payload", {}) or {}
+            text = payload.get("text") or payload.get("content") or payload.get("chunk")
+            if text:
+                contexts.append(str(text))
+        return contexts
+    except Exception:
+        return []
+
+
 def generate_v1_llm_reply(req: ChatV1Request) -> ChatResponse:
+    contexts: List[str] = []
+    if req.user_type == 0:
+        contexts = _qdrant_search(req.user_question)
+
     prompt = (
         "You are a helpful assistant. Use the provided user context to answer the question.\n\n"
         f"user_type: {req.user_type}\n"
@@ -25,8 +70,9 @@ def generate_v1_llm_reply(req: ChatV1Request) -> ChatResponse:
         f"session_id: {req.session_id}\n"
         f"department: {req.user_department}\n"
         f"year: {req.user_year}\n"
-        f"semester: {req.user_semester}\n\n"
-        f"Question: {req.user_question}\n"
+        f"semester: {req.user_semester}\n"
+        + ("\nRelevant context from search:\n" + "\n---\n".join(contexts) + "\n" if contexts else "\n")
+        + f"\nQuestion: {req.user_question}\n"
     )
 
     # Prefer OpenRouter if configured
