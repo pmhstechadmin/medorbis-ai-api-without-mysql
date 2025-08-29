@@ -5,6 +5,8 @@ import sys
 import argparse
 from http.server import ThreadingHTTPServer, BaseHTTPRequestHandler
 from urllib.parse import urlparse, parse_qs
+from urllib.request import Request, urlopen
+from urllib.error import URLError, HTTPError
 from io import BytesIO
 import cgi
 
@@ -50,8 +52,101 @@ def _parse_post(handler: BaseHTTPRequestHandler):
     raise ValueError("Unsupported Media Type. Use application/json or form-data")
 
 
+# --- Embeddings using Sentence-Transformers via Hugging Face Inference API (no external deps) ---
+
+def _hf_embed(texts: list[str]) -> list[list[float]] | None:
+    # Uses either a custom endpoint or HF public inference API
+    model = os.getenv('SENTENCE_MODEL') or os.getenv('HUGGINGFACE_MODEL') or 'sentence-transformers/all-MiniLM-L6-v2'
+    endpoint = os.getenv('HUGGINGFACE_API_URL') or f"https://api-inference.huggingface.co/pipeline/feature-extraction/{model}"
+    token = os.getenv('HUGGINGFACE_API_KEY')
+    headers = {'Content-Type': 'application/json'}
+    if token:
+        headers['Authorization'] = f"Bearer {token}"
+    payload = json.dumps(texts).encode('utf-8')
+    try:
+        req = Request(endpoint, data=payload, headers=headers, method='POST')
+        with urlopen(req, timeout=30) as resp:
+            data = resp.read()
+            parsed = json.loads(data)
+            # HF returns [dim] for single text or [[dim], [dim], ...] for multiple
+            if isinstance(parsed, list) and parsed and isinstance(parsed[0], (int, float)):
+                return [parsed]
+            if isinstance(parsed, list) and parsed and isinstance(parsed[0], list):
+                return parsed
+            return None
+    except HTTPError as e:
+        sys.stderr.write(f"HF embed HTTPError: {e.code} {e.reason}\n")
+        return None
+    except URLError as e:
+        sys.stderr.write(f"HF embed URLError: {e.reason}\n")
+        return None
+    except Exception as e:
+        sys.stderr.write(f"HF embed error: {e}\n")
+        return None
+
+
+# --- Qdrant search via REST API (no qdrant-client dependency) ---
+
+def _qdrant_search_vec(vec: list[float], limit: int = 3) -> list[dict]:
+    url = os.getenv('QDRANT_URL')
+    api_key = os.getenv('QDRANT_API_KEY')
+    collection = os.getenv('QDRANT_COLLECTION', 'documents')
+    vector_name = os.getenv('QDRANT_VECTOR_NAME')
+    if not url:
+        return []
+
+    # Fixed metadata filters requested
+    q_filter = {
+        "must": [
+            {"key": "Department", "match": {"value": "Nursing"}},
+            {"key": "Year", "match": {"value": "3"}},
+            {"key": "Semester", "match": {"value": "1"}},
+        ]
+    }
+
+    body = {
+        "limit": limit,
+        "with_payload": True,
+        "filter": q_filter,
+    }
+    if vector_name:
+        body["vector"] = {vector_name: vec}
+    else:
+        body["vector"] = vec
+
+    endpoint = url.rstrip('/') + f"/collections/{collection}/points/search"
+    headers = {'Content-Type': 'application/json'}
+    if api_key:
+        headers['api-key'] = api_key
+    try:
+        req = Request(endpoint, data=json.dumps(body).encode('utf-8'), headers=headers, method='POST')
+        with urlopen(req, timeout=15) as resp:
+            data = json.loads(resp.read() or b'{}')
+            res = data.get('result') or []
+            return res if isinstance(res, list) else []
+    except HTTPError as e:
+        sys.stderr.write(f"Qdrant HTTPError: {e.code} {e.reason}\n")
+        return []
+    except URLError as e:
+        sys.stderr.write(f"Qdrant URLError: {e.reason}\n")
+        return []
+    except Exception as e:
+        sys.stderr.write(f"Qdrant error: {e}\n")
+        return []
+
+
+def _qdrant_contexts_from_results(results: list[dict]) -> list[str]:
+    contexts: list[str] = []
+    for p in results:
+        payload = p.get('payload') or {}
+        text = payload.get('text') or payload.get('content') or payload.get('chunk') or payload.get('body')
+        if isinstance(text, (str, int, float)):
+            contexts.append(str(text))
+    return contexts
+
+
 class ApiHandler(BaseHTTPRequestHandler):
-    server_version = "MedOrbisSimpleHTTP/1.0"
+    server_version = "MedOrbisSimpleHTTP/1.1"
 
     def _send_headers(self, status=200, extra_headers=None, content_type='application/json'):
         self.send_response(status)
@@ -78,13 +173,11 @@ class ApiHandler(BaseHTTPRequestHandler):
         path = parsed.path
         query = parse_qs(parsed.query)
 
-        # Root and health
         if path == '/':
             return self._send_json({"message": "API is running"})
         if path == '/health':
             return self._send_json({"status": "ok"})
 
-        # v2 endpoints
         if path in ('/api/v2/chat', '/v2/chat'):
             return self._send_json({
                 "endpoint": "/api/v2/chat",
@@ -102,7 +195,6 @@ class ApiHandler(BaseHTTPRequestHandler):
             }
             return self._send_json({"reply": reply_text, "usage": usage})
 
-        # v1 endpoints
         if path == '/api/v1/chat':
             return self._send_json({
                 "endpoint": "/api/v1/chat",
@@ -153,7 +245,6 @@ class ApiHandler(BaseHTTPRequestHandler):
             }
             return self._send_json(self._generate_v1_reply(payload))
 
-        # Not found
         return self._send_json({"detail": "Not Found"}, status=404)
 
     def do_POST(self):
@@ -163,7 +254,6 @@ class ApiHandler(BaseHTTPRequestHandler):
             if path in ('/api/v2/chat', '/v2/chat'):
                 data = _parse_post(self)
                 messages = data.get('messages') or []
-                # Normalize messages structure
                 if isinstance(messages, str):
                     try:
                         messages = json.loads(messages)
@@ -187,7 +277,6 @@ class ApiHandler(BaseHTTPRequestHandler):
 
             if path == '/api/v1/chat':
                 data = _parse_post(self)
-                # Build dict for both JSON and form inputs
                 payload = {
                     "user_type": int(str(data.get('user_type', 0) or '0')),
                     "user_id": data.get('user_id', '') or '',
@@ -207,13 +296,21 @@ class ApiHandler(BaseHTTPRequestHandler):
         return self._send_json({"detail": "Not Found"}, status=404)
 
     def log_message(self, format, *args):
-        # Reduce noisy default logging; print to stdout
         sys.stdout.write("%s - - [%s] " % (self.client_address[0], self.log_date_time_string()))
         sys.stdout.write(format % args)
         sys.stdout.write("\n")
 
     def _generate_v1_reply(self, req: dict) -> dict:
-        # Local fallback only (no external dependencies)
+        contexts: list[str] = []
+        used_vector = False
+        if int(req.get('user_type') or 0) == 0:
+            texts = [str(req.get('user_question') or '')]
+            vecs = _hf_embed(texts) if texts and texts[0] else None
+            if vecs and vecs[0]:
+                used_vector = True
+                results = _qdrant_search_vec(vecs[0], limit=int(os.getenv('QDRANT_TOP_K', '3')))
+                contexts = _qdrant_contexts_from_results(results)
+
         prompt_context = (
             f"user_type: {req.get('user_type')}\n"
             f"user_id: {req.get('user_id')}\n"
@@ -223,21 +320,30 @@ class ApiHandler(BaseHTTPRequestHandler):
             f"semester: {req.get('user_semester')}\n\n"
             f"Question: {req.get('user_question')}\n"
         )
-        reply_text = (
+        reply_parts = []
+        if contexts:
+            reply_parts.append("Relevant information:\n" + "\n---\n".join(contexts))
+        reply_parts.append(
+            f"Response: Based on your context (dept={req.get('user_department')}, year={req.get('user_year')}, "
+            f"semester={req.get('user_semester')}), here's a helpful response to your question: "
+            f"{req.get('user_question')}"
+        )
+        reply_text = "\n\n".join(reply_parts) if reply_parts else (
             f"[Local] Based on your context (dept={req.get('user_department')}, year={req.get('user_year')}, "
             f"semester={req.get('user_semester')}), here's a helpful response to your question: "
             f"{req.get('user_question')}"
         )
         tokens_in = _word_count(prompt_context)
+        if contexts:
+            tokens_in += _word_count(" ".join(contexts))
         tokens_out = _word_count(reply_text)
-        return {
-            "reply": reply_text,
-            "usage": {
-                "input_tokens": tokens_in,
-                "output_tokens": tokens_out,
-                "total_tokens": tokens_in + tokens_out,
-            },
+        usage = {
+            "input_tokens": tokens_in,
+            "output_tokens": tokens_out,
+            "total_tokens": tokens_in + tokens_out,
         }
+        meta = {"used_vector": used_vector, "contexts": len(contexts)}
+        return {"reply": reply_text, "usage": usage, "meta": meta}
 
 
 def run(host: str, port: int):
