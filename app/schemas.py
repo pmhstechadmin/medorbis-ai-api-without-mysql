@@ -13,6 +13,17 @@ class ChatRequest(BaseModel):
     stream: bool = False
 
 
+class ChatV1Request(BaseModel):
+    user_type: int
+    user_id: str
+    session_id: str
+    user_question: str
+    user_department: str
+    user_year: str
+    user_semester: str
+    model: Optional[str] = None
+
+
 class Usage(BaseModel):
     input_tokens: int
     output_tokens: int
