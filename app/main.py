@@ -1,8 +1,9 @@
 from typing import List, Optional
-from fastapi import FastAPI
+from fastapi import FastAPI, Request, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 from dotenv import load_dotenv
+import json
 
 load_dotenv()
 
@@ -50,15 +51,36 @@ async def chat_get() -> dict:
 
 
 @app.post("/api/v2/chat", response_model=ChatResponse)
-async def chat(req: ChatRequest) -> ChatResponse:
-    last_user = next((m for m in reversed(req.messages) if m.role.lower() == "user"), None)
-    user_text = last_user.content.strip() if last_user and last_user.content else ""
-    if user_text:
-        reply_text = f"You said: {user_text}"
+async def chat(req: Request) -> ChatResponse:
+    ct = req.headers.get("content-type", "").lower()
+    data: dict
+    if "application/json" in ct:
+        data = await req.json()
+    elif "multipart/form-data" in ct or "application/x-www-form-urlencoded" in ct:
+        form = await req.form()
+        if "messages" in form:
+            try:
+                data = {"messages": json.loads(form["messages"]) if isinstance(form["messages"], str) else form["messages"]}
+            except Exception:
+                raise HTTPException(status_code=400, detail="Invalid 'messages' in form; expected JSON string")
+        else:
+            # Allow simple role/content fields as a convenience
+            role = (form.get("role") or "user").strip()
+            content = (form.get("content") or "").strip()
+            data = {"messages": [{"role": role, "content": content}]}
     else:
-        reply_text = "Hello! How can I help you?"
+        raise HTTPException(status_code=415, detail="Unsupported Media Type. Use application/json or form-data with 'messages'")
 
-    input_tokens = len(" ".join(m.content for m in req.messages).split()) if req.messages else 0
+    try:
+        parsed = ChatRequest.model_validate(data)
+    except Exception:
+        raise HTTPException(status_code=400, detail="Invalid body. Expected { messages: [{ role, content }] }")
+
+    last_user = next((m for m in reversed(parsed.messages) if m.role.lower() == "user"), None)
+    user_text = last_user.content.strip() if last_user and last_user.content else ""
+    reply_text = f"You said: {user_text}" if user_text else "Hello! How can I help you?"
+
+    input_tokens = len(" ".join(m.content for m in parsed.messages).split()) if parsed.messages else 0
     output_tokens = len(reply_text.split())
     usage = Usage(
         input_tokens=input_tokens,
