@@ -52,8 +52,6 @@ def _parse_post(handler: BaseHTTPRequestHandler):
     raise ValueError("Unsupported Media Type. Use application/json or form-data")
 
 
-# --- Embeddings using Sentence-Transformers via Hugging Face Inference API (no external deps) ---
-
 def _hf_embed(texts: list[str]) -> list[list[float]] | None:
     model = os.getenv('SENTENCE_MODEL') or os.getenv('HUGGINGFACE_MODEL') or 'sentence-transformers/all-MiniLM-L6-v2'
     endpoint = os.getenv('HUGGINGFACE_API_URL') or f"https://api-inference.huggingface.co/pipeline/feature-extraction/{model}"
@@ -82,8 +80,6 @@ def _hf_embed(texts: list[str]) -> list[list[float]] | None:
         sys.stderr.write(f"HF embed error: {e}\n")
         return None
 
-
-# --- Qdrant search via REST API (no qdrant-client dependency) ---
 
 def _build_qdrant_filter(dept: str, year: str, sem: str) -> dict | None:
     must = []
@@ -147,7 +143,7 @@ def _qdrant_contexts_from_results(results: list[dict]) -> list[str]:
 
 
 class ApiHandler(BaseHTTPRequestHandler):
-    server_version = "MedOrbisSimpleHTTP/1.2"
+    server_version = "MedOrbisSimpleHTTP/2.0"
 
     def _send_headers(self, status=200, extra_headers=None, content_type='application/json'):
         self.send_response(status)
@@ -183,61 +179,27 @@ class ApiHandler(BaseHTTPRequestHandler):
             return self._send_json({
                 "endpoint": "/api/v2/chat",
                 "method": "POST",
-                "content_type": "application/json",
-                "example": {"messages": [{"role": "user", "content": "Hello"}]},
+                "content_type": "application/json or form-data",
+                "json_examples": [
+                    {"messages": [{"role": "user", "content": "Hello"}]},
+                    {"user_type": 0, "user_question": "Hello", "Department": "Nursing", "Year": "3", "Semester": "1"}
+                ],
+                "note": "When user_type=0 and Department/Year/Semester are provided, the service performs a vector search in Qdrant using sentence-transformers embeddings. Other user_types skip vector search."
             })
-        if path in ('/api/v2/chat/echo', '/v2/chat/echo'):
-            content = (query.get('content', [''])[0] or '').strip()
-            reply_text = f"You said: {content}" if content else "Hello! How can I help you?"
-            usage = {
-                "input_tokens": _word_count(content),
-                "output_tokens": _word_count(reply_text),
-                "total_tokens": _word_count(content) + _word_count(reply_text),
-            }
-            return self._send_json({"reply": reply_text, "usage": usage})
-
-        if path == '/api/v1/chat':
-            return self._send_json({
-                "endpoint": "/api/v1/chat",
-                "method": "POST",
-                "content_type": "application/json or multipart/form-data",
-                "example": {
-                    "user_type": 0,
-                    "user_id": "string",
-                    "session_id": "string",
-                    "user_question": "string",
-                    "Department": "Nursing",
-                    "Year": "3",
-                    "Semester": "1"
-                },
-                "note": "You can also use user_department, user_year, user_semester as alternative field names."
-            })
-        if path == '/api/v1/chat/echo':
-            content = (query.get('content', [''])[0] or '').strip()
-            reply_text = f"You said: {content}" if content else "Hello! How can I help you?"
-            usage = {
-                "input_tokens": _word_count(content),
-                "output_tokens": _word_count(reply_text),
-                "total_tokens": _word_count(content) + _word_count(reply_text),
-            }
-            return self._send_json({"reply": reply_text, "usage": usage})
-        if path == '/api/v1/chat/test':
+        if path in ('/api/v2/chat/test', '/v2/chat/test'):
             def _q(name, default=""):
                 vals = query.get(name, [default])
                 return vals[0] if vals else default
-            user_type = int(_q('user_type', '0') or '0')
             payload = {
-                "user_type": user_type,
-                "user_id": _q('user_id'),
-                "session_id": _q('session_id'),
+                "user_type": int(_q('user_type', '0') or '0'),
                 "user_question": _q('user_question'),
-                # Accept both capitalized metadata and legacy fields
                 "Department": _q('Department') or _q('user_department'),
                 "Year": _q('Year') or _q('user_year'),
                 "Semester": _q('Semester') or _q('user_semester'),
-                "model": _q('model', None),
+                "user_id": _q('user_id'),
+                "session_id": _q('session_id'),
             }
-            return self._send_json(self._generate_v1_reply(payload))
+            return self._send_json(self._handle_v2_structured(payload))
 
         return self._send_json({"detail": "Not Found"}, status=404)
 
@@ -247,42 +209,39 @@ class ApiHandler(BaseHTTPRequestHandler):
         try:
             if path in ('/api/v2/chat', '/v2/chat'):
                 data = _parse_post(self)
-                messages = data.get('messages') or []
-                if isinstance(messages, str):
-                    try:
-                        messages = json.loads(messages)
-                    except Exception:
-                        raise ValueError("Invalid 'messages'; expected JSON array")
-                last_user = None
-                for m in reversed(messages):
-                    role = (m.get('role') or '').lower()
-                    if role == 'user':
-                        last_user = m
-                        break
-                user_text = (last_user.get('content') or '').strip() if last_user else ''
-                reply_text = f"You said: {user_text}" if user_text else "Hello! How can I help you?"
-                input_tokens = _word_count(" ".join([m.get('content') or '' for m in messages])) if messages else 0
-                usage = {
-                    "input_tokens": input_tokens,
-                    "output_tokens": _word_count(reply_text),
-                    "total_tokens": input_tokens + _word_count(reply_text),
-                }
-                return self._send_json({"reply": reply_text, "usage": usage})
-
-            if path == '/api/v1/chat':
-                data = _parse_post(self)
-                payload = {
-                    "user_type": int(str(data.get('user_type', 0) or '0')),
-                    "user_id": data.get('user_id', '') or '',
-                    "session_id": data.get('session_id', '') or '',
-                    "user_question": data.get('user_question', '') or '',
-                    # Accept capitalized metadata; fallback to legacy names
-                    "Department": data.get('Department') or data.get('user_department') or '',
-                    "Year": data.get('Year') or data.get('user_year') or '',
-                    "Semester": data.get('Semester') or data.get('user_semester') or '',
-                    "model": data.get('model') if data.get('model') not in (None, '') else None,
-                }
-                return self._send_json(self._generate_v1_reply(payload))
+                if 'messages' in data:
+                    messages = data.get('messages') or []
+                    if isinstance(messages, str):
+                        try:
+                            messages = json.loads(messages)
+                        except Exception:
+                            raise ValueError("Invalid 'messages'; expected JSON array")
+                    last_user = None
+                    for m in reversed(messages):
+                        role = (m.get('role') or '').lower()
+                        if role == 'user':
+                            last_user = m
+                            break
+                    user_text = (last_user.get('content') or '').strip() if last_user else ''
+                    reply_text = f"You said: {user_text}" if user_text else "Hello! How can I help you?"
+                    input_tokens = _word_count(" ".join([m.get('content') or '' for m in messages])) if messages else 0
+                    usage = {
+                        "input_tokens": input_tokens,
+                        "output_tokens": _word_count(reply_text),
+                        "total_tokens": input_tokens + _word_count(reply_text),
+                    }
+                    return self._send_json({"reply": reply_text, "usage": usage})
+                else:
+                    payload = {
+                        "user_type": int(str(data.get('user_type', 0) or '0')),
+                        "user_question": data.get('user_question', '') or '',
+                        "Department": data.get('Department') or data.get('user_department') or '',
+                        "Year": data.get('Year') or data.get('user_year') or '',
+                        "Semester": data.get('Semester') or data.get('user_semester') or '',
+                        "user_id": data.get('user_id', '') or '',
+                        "session_id": data.get('session_id', '') or '',
+                    }
+                    return self._send_json(self._handle_v2_structured(payload))
         except ValueError as e:
             return self._send_json({"detail": str(e)}, status=400)
         except Exception:
@@ -295,15 +254,15 @@ class ApiHandler(BaseHTTPRequestHandler):
         sys.stdout.write(format % args)
         sys.stdout.write("\n")
 
-    def _generate_v1_reply(self, req: dict) -> dict:
+    def _handle_v2_structured(self, req: dict) -> dict:
         contexts: list[str] = []
         used_vector = False
-        dept = str(req.get('Department') or req.get('user_department') or '')
-        year = str(req.get('Year') or req.get('user_year') or '')
-        sem = str(req.get('Semester') or req.get('user_semester') or '')
+        dept = str(req.get('Department') or '')
+        year = str(req.get('Year') or '')
+        sem = str(req.get('Semester') or '')
         if int(req.get('user_type') or 0) == 0:
-            texts = [str(req.get('user_question') or '')]
-            vecs = _hf_embed(texts) if texts and texts[0] else None
+            text = str(req.get('user_question') or '')
+            vecs = _hf_embed([text]) if text else None
             if vecs and vecs[0]:
                 used_vector = True
                 q_filter = _build_qdrant_filter(dept=dept, year=year, sem=sem)
@@ -326,13 +285,8 @@ class ApiHandler(BaseHTTPRequestHandler):
             f"Response: Based on your context (Department={dept}, Year={year}, Semester={sem}), "
             f"here's a helpful response to your question: {req.get('user_question')}"
         )
-        reply_text = "\n\n".join(reply_parts) if reply_parts else (
-            f"[Local] Based on your context (Department={dept}, Year={year}, Semester={sem}), "
-            f"here's a helpful response to your question: {req.get('user_question')}"
-        )
-        tokens_in = _word_count(prompt_context)
-        if contexts:
-            tokens_in += _word_count(" ".join(contexts))
+        reply_text = "\n\n".join(reply_parts)
+        tokens_in = _word_count(prompt_context) + (_word_count(" ".join(contexts)) if contexts else 0)
         tokens_out = _word_count(reply_text)
         usage = {
             "input_tokens": tokens_in,
