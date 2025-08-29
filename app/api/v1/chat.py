@@ -1,8 +1,8 @@
 from typing import Optional
 import json
 from fastapi import APIRouter, Request, HTTPException
-from app.schemas import ChatRequest, ChatResponse, Usage
-from app.services.chat_service import generate_reply
+from app.schemas import ChatRequest, ChatResponse, Usage, ChatV1Request
+from app.services.chat_service import generate_reply, generate_v1_llm_reply
 
 router = APIRouter(prefix="/api/v1", tags=["chat"])
 
@@ -12,8 +12,25 @@ async def chat_get() -> dict:
     return {
         "endpoint": "/api/v1/chat",
         "method": "POST",
-        "content_type": "application/json",
-        "example": {"messages": [{"role": "user", "content": "Hello"}]},
+        "content_type": "application/json or multipart/form-data",
+        "example": {
+            "user_type": 0,
+            "user_id": "string",
+            "session_id": "string",
+            "user_question": "string",
+            "user_department": "string",
+            "user_year": "string",
+            "user_semester": "string"
+        },
+        "form_example": {
+            "user_type": "0",
+            "user_id": "u1",
+            "session_id": "s1",
+            "user_question": "Hello",
+            "user_department": "CSE",
+            "user_year": "2",
+            "user_semester": "4"
+        }
     }
 
 
@@ -37,21 +54,22 @@ async def chat(req: Request) -> ChatResponse:
         data = await req.json()
     elif "multipart/form-data" in ct or "application/x-www-form-urlencoded" in ct:
         form = await req.form()
-        if "messages" in form:
-            try:
-                data = {"messages": json.loads(form["messages"]) if isinstance(form["messages"], str) else form["messages"]}
-            except Exception:
-                raise HTTPException(status_code=400, detail="Invalid 'messages' in form; expected JSON string")
-        else:
-            role = (form.get("role") or "user").strip()
-            content = (form.get("content") or "").strip()
-            data = {"messages": [{"role": role, "content": content}]}
+        # Build dict from form fields
+        data = {
+            "user_type": int(form.get("user_type", 0)) if str(form.get("user_type", "")).strip() != "" else 0,
+            "user_id": form.get("user_id", ""),
+            "session_id": form.get("session_id", ""),
+            "user_question": form.get("user_question", ""),
+            "user_department": form.get("user_department", ""),
+            "user_year": form.get("user_year", ""),
+            "user_semester": form.get("user_semester", ""),
+        }
     else:
-        raise HTTPException(status_code=415, detail="Unsupported Media Type. Use application/json or form-data with 'messages'")
+        raise HTTPException(status_code=415, detail="Unsupported Media Type. Use application/json or form-data")
 
     try:
-        parsed = ChatRequest.model_validate(data)
+        parsed = ChatV1Request.model_validate(data)
     except Exception:
-        raise HTTPException(status_code=400, detail="Invalid body. Expected { messages: [{ role, content }] }")
+        raise HTTPException(status_code=400, detail="Invalid body. Expected v1 fields")
 
-    return generate_reply(parsed)
+    return generate_v1_llm_reply(parsed)
