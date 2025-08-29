@@ -2,6 +2,7 @@ from typing import List, Optional
 from fastapi import FastAPI, Request, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
+from app.api.v1.chat import router as v1_chat_router
 from dotenv import load_dotenv
 import json
 
@@ -16,6 +17,9 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+# Mount v1 API router
+app.include_router(v1_chat_router)
 
 
 class Message(BaseModel):
