@@ -91,7 +91,7 @@ async def chat(req: Request) -> ChatResponse:
         raise HTTPException(status_code=415, detail="Unsupported Media Type. Use application/json or form-data with 'messages'")
 
     try:
-        parsed = ChatRequest.model_validate(data)
+        parsed = ChatRequest.parse_obj(data)
     except Exception:
         raise HTTPException(status_code=400, detail="Invalid body. Expected { messages: [{ role, content }] }")
 

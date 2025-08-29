@@ -93,7 +93,7 @@ async def chat(req: Request) -> ChatResponse:
         raise HTTPException(status_code=415, detail="Unsupported Media Type. Use application/json or form-data")
 
     try:
-        parsed = ChatV1Request.model_validate(data)
+        parsed = ChatV1Request.parse_obj(data)
     except Exception:
         raise HTTPException(status_code=400, detail="Invalid body. Expected v1 fields")
 
