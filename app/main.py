@@ -41,6 +41,7 @@ class ChatResponse(BaseModel):
 
 
 @app.get("/api/v2/chat")
+@app.get("/v2/chat")
 async def chat_get() -> dict:
     return {
         "endpoint": "/api/v2/chat",
@@ -51,6 +52,7 @@ async def chat_get() -> dict:
 
 
 @app.post("/api/v2/chat", response_model=ChatResponse)
+@app.post("/v2/chat", response_model=ChatResponse)
 async def chat(req: Request) -> ChatResponse:
     ct = req.headers.get("content-type", "").lower()
     data: dict
