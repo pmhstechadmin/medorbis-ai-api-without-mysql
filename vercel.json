@@ -7,6 +7,7 @@
     }
   },
   "routes": [
+    { "src": "/api/v1/(.*)", "dest": "/api/index.py" },
     { "src": "/api/(.*)", "dest": "/api/index.py" },
     { "src": "/(health|docs|openapi.json|v2/.*)", "dest": "/api/index.py" }
   ]
